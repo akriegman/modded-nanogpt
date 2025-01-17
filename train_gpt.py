@@ -590,8 +590,16 @@ for step in range(train_steps + 1):
 
     # --------------- TRAINING SECTION BEGIN -----------------
     inputs, targets = next(train_loader)
+    total_loss = 0.0
     for input_seq, target_seq in zip(inputs.split(args.seq_len), targets.split(args.seq_len)):
-        model(input_seq, target_seq, sw_num_blks(window_size)).backward()
+        loss = model(input_seq, target_seq, sw_num_blks(window_size))
+        total_loss += loss.item()  # Capture the loss value
+        loss.backward()
+    
+    # Average the loss across all sequences
+    avg_loss = total_loss / (len(inputs) / args.seq_len)
+    dist.all_reduce(torch.tensor(avg_loss, device='cuda'), op=dist.ReduceOp.AVG)
+    
     for param in model.parameters():
         dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
     # momentum warmup for Muon
@@ -606,7 +614,7 @@ for step in range(train_steps + 1):
     model.zero_grad(set_to_none=True)
     # logging
     approx_time = training_time_ms + 1000 * (time.perf_counter() - t0)
-    print0(f"step:{step+1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms", console=True)
+    print0(f"step:{step+1}/{train_steps} train_loss:{avg_loss:.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms", console=True)
 
 print0(
     f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
