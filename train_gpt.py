@@ -193,8 +193,11 @@ class Muon(torch.optim.Optimizer):
                 assert handle is not None
                 handle.wait()
                 for p_world, g_world in zip(params_world, update_buffer_views):
+                    # Scale the update by the square of the weights
+                    scale = p_world * p_world
+                    g_world = g_world.view_as(p_world)
                     p_world.add_(
-                        g_world.view_as(p_world),
+                        g_world * scale,
                         alpha=-lr * max(1, p_world.size(-2) / p_world.size(-1)) ** 0.5,
                     )
             for base_i in range(len(params))[::self.world_size]:
