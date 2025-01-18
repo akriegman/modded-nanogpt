@@ -326,7 +326,7 @@ class ValueEmbedding(nn.Module):
     def forward(self, input_seq) -> list[Tensor | None]:
         ve = [emb(input_seq) for emb in self.embed]
         # 012 ... 012 structure on token value embeddings by @YouJiacheng, improved on @leloykun's U-net structure
-        ve = [ve[0], ve[1], ve[2], None, None, None, None, None, None, ve[0], ve[1], ve[2]]
+        ve = [ve[0], ve[1], None, None,ve[0], ve[1]]
         return ve
 
 # -----------------------------------------------------------------------------
