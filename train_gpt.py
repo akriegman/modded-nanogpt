@@ -159,11 +159,12 @@ class Muon(torch.optim.Optimizer):
         momentum: The momentum used by the internal SGD.
         nesterov: Whether to use Nesterov-style momentum in the internal SGD. (recommended)
         ns_steps: The number of Newton-Schulz iteration steps to use.
+        alpha: Power for weight-based scaling (default: 2.0)
     """
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, rank=0, world_size=1):
+    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, rank=0, world_size=1, alpha=0.0):
         self.rank = rank
         self.world_size = world_size
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, alpha=alpha)
         params: list[Tensor] = [*params]
         assert all(isinstance(p, Tensor) for p in params)
         sizes = {p.numel() for p in params}
@@ -181,6 +182,7 @@ class Muon(torch.optim.Optimizer):
             momentum = group["momentum"]
             nesterov = group["nesterov"]
             ns_steps = group["ns_steps"]
+            alpha = group["alpha"]
             update_buffer = group["update_buffer"]
             update_buffer_views: list[Tensor] = group["update_buffer_views"]
             # generate weight updates in distributed fashion
@@ -193,8 +195,8 @@ class Muon(torch.optim.Optimizer):
                 assert handle is not None
                 handle.wait()
                 for p_world, g_world in zip(params_world, update_buffer_views):
-                    # Scale the update by the square of the weights
-                    scale = p_world * p_world
+                    # Scale the update by abs(weights)^alpha
+                    scale = p_world.abs().pow(alpha)
                     g_world = g_world.view_as(p_world)
                     p_world.add_(
                         g_world * scale,
@@ -509,7 +511,7 @@ print0("="*100)
 # load data
 train_loader = distributed_data_generator(args.train_files, args.batch_size, rank, world_size)
 
-model = GPT(vocab_size=50257, num_layers=12, num_heads=6, model_dim=768).cuda()
+model = GPT(vocab_size=50257, num_layers=6, num_heads=6, model_dim=384).cuda()
 for m in model.modules():
     if isinstance(m, nn.Embedding):
         m.bfloat16()
@@ -525,7 +527,7 @@ head_params = [model.lm_head.weight]
 # init the optimizer(s)
 adam_params = [dict(params=head_params, lr=0.008), dict(params=embed_params, lr=0.6), dict(params=scalar_params, lr=0.04)]
 optimizer1 = torch.optim.Adam(adam_params, betas=(0.8, 0.95), fused=True, eps=1e-10)
-optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, rank=rank, world_size=world_size)
+optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, alpha=0.0, rank=rank, world_size=world_size)
 optimizers = [optimizer1, optimizer2]
 
 # learning rate schedule: stable then decay
