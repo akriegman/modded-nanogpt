@@ -416,9 +416,9 @@ class GPT(nn.Module):
             x = x + self.skip_weights[i] * skip_connections.pop()
             x = self.blocks[self.num_encoder_layers + i](x, ve_dec[i], x0, block_masks[i])
         x = norm(x)
-        probs = torch.relu(x * self.lm_head.weight).sum(dim=-2)
+        probs = (x.unsqueeze(-1) * self.lm_head.weight.t()).relu().sum(dim=-2)
         probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-12)
-        loss = -torch.log(probs.view(-1, probs.size(-1))[range(len(target_seq)), target_seq] + 1e-12).mean()
+        loss = F.nll_loss(torch.log(probs + 1e-12), target_seq)
         
         return loss
 
