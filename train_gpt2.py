@@ -542,13 +542,22 @@ for step in range(args.num_iterations + 1):
 
     # --------------- TRAINING SECTION BEGIN -----------------
     model.train()
+    train_loss = 0.0
     for i in range(1, train_accumulation_steps+1):
         ctx = model.no_sync() if i < train_accumulation_steps else contextlib.nullcontext()
         with ctx: # there's no need to sync gradients every accumulation step
             loss = model(inputs_train, targets_train, sliding_window_size)
+            train_loss += loss.item()  # Accumulate the loss value
             loss.backward()
             del loss
             inputs_train, targets_train = train_loader.next_batch()
+    train_loss /= train_accumulation_steps  # Average the loss over accumulation steps
+    
+    # Synchronize training loss across all processes
+    train_loss_tensor = torch.tensor([train_loss], device='cuda')
+    dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.AVG)
+    train_loss = train_loss_tensor.item()
+    
     if train_accumulation_steps != 1:
         for p in model.parameters():
             p.grad /= train_accumulation_steps
@@ -565,7 +574,7 @@ for step in range(args.num_iterations + 1):
     # --------------- TRAINING SECTION END -------------------
     # everything that follows now is just diagnostics, prints, logging, etc.
     approx_time = training_time_ms + 1000 * (time.perf_counter() - t0)
-    print0(f"step:{step+1}/{args.num_iterations} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms")
+    print0(f"step:{step+1}/{args.num_iterations} train_loss:{train_loss:.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms")
 
 print0(f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
 
