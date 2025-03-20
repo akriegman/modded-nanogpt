@@ -175,18 +175,16 @@ class CausalSelfAttention(nn.Module):
         self.c_q = CastedLinear(dim, dim)
         self.c_k = CastedLinear(dim, dim)
         self.c_v = CastedLinear(dim, dim)
-        self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
-        self.rotary = Rotary(dim // num_heads) # dim // num_heads = head_dim
         self.c_proj = CastedLinear(dim, dim)
         self.c_proj.weight.data.zero_() # zero init suggested by @Grad62304977
+        self.rotary = Rotary(dim // num_heads) # dim // num_heads = head_dim
 
-    def forward(self, x, vi, block_mask):
+    def forward(self, x, block_mask):
         B, T = x.size(0), x.size(1) # batch size, sequence length
         assert B == 1, "Must use batch size = 1 for FlexAttention"
         q = self.c_q(x).view(B, T, self.num_heads, -1)
         k = self.c_k(x).view(B, T, self.num_heads, -1)
         v = self.c_v(x).view(B, T, self.num_heads, -1)
-        v = self.lambdas[0] * v + self.lambdas[1] * vi.view_as(v) # @KoszarskyB & @Grad62304977
         q, k = norm(q), norm(k) # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
         y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask)
@@ -214,11 +212,9 @@ class Block(nn.Module):
         super().__init__()
         self.attn = CausalSelfAttention(config.model_dim, config.num_heads)
         self.mlp = MLP(config.model_dim)
-        self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
 
-    def forward(self, x, vi, x0, block_mask):
-        x = self.lambdas[0] * x + self.lambdas[1] * x0
-        x = x + self.attn(norm(x), vi, block_mask)
+    def forward(self, x, block_mask):
+        x = x + self.attn(x, block_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -246,9 +242,6 @@ class GPT(nn.Module):
 
         self.embed = nn.Embedding(config.vocab_size, config.model_dim)
         self.blocks = nn.ModuleList([Block(config) for _ in range(config.num_layers)])
-        # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual learning
-        # U-net structure on token value embeddings by @leloykun
-        self.value_embeds = nn.Embedding(config.vocab_size, config.model_dim*self.num_encoder_layers)
         self.lm_head = CastedLinear(config.model_dim, config.vocab_size)
         self.lm_head.weight.data.zero_() # @Grad62304977
 
@@ -283,20 +276,10 @@ class GPT(nn.Module):
         # forward the GPT model itself
         x = self.embed(inputs[None]) # token embeddings of shape (b, t, model_dim)
         x = norm(x) # @Grad62304977
-        x0 = x
-        vi = self.value_embeds(inputs[None]).chunk(self.num_encoder_layers, dim=-1)
 
-        # Store outputs for U-Net skip connections
-        skip_connections = []
-        # Encoder pass - process only the first half of the blocks
-        for i in range(self.num_encoder_layers):
-            x = self.blocks[i](x, vi[i], x0, block_mask)
-            skip_connections.append(x)
-        # Decoder pass - process the remaining blocks with weighted skip connections
-        for i in range(self.num_decoder_layers):
-            x = x + self.skip_weights[i] * skip_connections.pop()
-            # U-net structure on token value embeddings by @leloykun
-            x = self.blocks[self.num_encoder_layers + i](x, vi[self.num_encoder_layers-1-i], x0, block_mask)
+        # Simple sequential processing of blocks
+        for block in self.blocks:
+            x = block(x, block_mask)
 
         x = norm(x)
         logits = self.lm_head(x)
@@ -453,11 +436,11 @@ model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module # always contains the "raw" unwrapped model
 
 # init the optimizer(s)
-optimizer1 = torch.optim.Adam([raw_model.embed.weight, raw_model.value_embeds.weight], lr=0.6, betas=(0.8, 0.95), fused=True)
+optimizer1 = torch.optim.Adam([raw_model.embed.weight], lr=0.6, betas=(0.8, 0.95), fused=True)
 optimizer2 = torch.optim.Adam([raw_model.lm_head.weight], lr=0.008, betas=(0.8, 0.95), fused=True)
 params = list(raw_model.blocks.parameters())
 matrix_params = [p for p in params if p.ndim == 2]
-scalar_params = [p for p in params if p.ndim < 2] + [raw_model.skip_weights]
+scalar_params = [p for p in params if p.ndim < 2]
 optimizer3 = Muon(matrix_params, lr=0.05, momentum=0.95)
 optimizer4 = torch.optim.Adam(scalar_params, lr=0.04, betas=(0.8, 0.95), fused=True)
 optimizers = [optimizer1, optimizer2, optimizer3, optimizer4]
